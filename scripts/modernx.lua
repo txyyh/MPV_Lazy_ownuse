@@ -76,11 +76,22 @@ local user_opts = {
     osc_color = "000000",               -- accent of the OSC and the title bar
     seekbarfg_color = "E39C42",         -- color of the seekbar progress and handle
     seekbarbg_color = "FFFFFF",         -- color of the remaining seekbar
+    tick_delay = 1 / 60,                -- minimum interval between OSC redraws in seconds
+    tick_delay_follow_display_fps = false -- use display fps as the minimum interval
 }
 
 -- read options from config and command-line
 opt.read_options(user_opts, "osc", function(list) update_options(list) end)
 
+user_opts.userdataAvail = (function()
+    local list = mp.get_property_native("property-list")
+    for k,v in ipairs(list) do
+        if (v == "user-data") then
+            return true
+        end
+    end
+    return false
+end)()
 
 -- deus0ww - 2021-11-26
 
@@ -633,7 +644,7 @@ local thumbfast = {
 }
 
 local window_control_box_width = 80
-local tick_delay = 0.03
+local tick_delay = 1 / 60
 
 local is_december = os.date("*t").month == 12
 
@@ -1447,10 +1458,7 @@ function show_message(text, duration)
     -- may slow down massively on huge input
     text = string.sub(text, 0, 4000)
 
-    -- replace actual linebreaks with ASS linebreaks
-    text = string.gsub(text, "\n", "\\N")
-
-    state.message_text = text
+    state.message_text = mp.command_native({"escape-ass", text})
 
     if not state.message_hide_timer then
         state.message_hide_timer = mp.add_timeout(0, request_tick)
@@ -1649,9 +1657,8 @@ function window_controls()
         ne = new_element("wctitle", "button")
         ne.content = function ()
             local title = mp.command_native({"expand-text", user_opts.title})
-            -- escape ASS, and strip newlines and trailing slashes
-            title = title:gsub("\\n", " "):gsub("\\$", ""):gsub("{","\\{")
-            return not (title == "") and title or "mpv"
+            title = title:gsub("\n", " ")
+        return title ~= "" and mp.command_native({"escape-ass", title}) or "mpv"
         end
         ne.hoverable = false
         local left_pad = 5
@@ -1813,6 +1820,11 @@ function layout()
     lo.geometry = {x = osc_geo.w - 87, y = refY - 20, an = 5, w = 24, h = 24}
     lo.style = osc_styles.smallButtons
 
+    -- Playback Speed
+    lo = add_layout("playback_speed")
+    lo.geometry = {x = osc_geo.w - 147, y = refY - 20, an = 5, w = 24, h = 24}
+    lo.style = osc_styles.smallButtons
+
     -- Toggle fullscreen
     lo = add_layout("tog_fs")
     lo.geometry = {x = osc_geo.w - 37, y = refY - 20, an = 5, w = 24, h = 24}
@@ -1838,9 +1850,13 @@ function validate_user_opts()
     end
 end
 
-function update_options(list)
+function update_options(list, changed)
     validate_user_opts()
+    if changed.tick_delay or changed.tick_delay_follow_display_fps then
+        set_tick_delay("display_fps", mp.get_property_number("display_fps", nil))
+    end
     request_tick()
+    set_tick_delay("display_fps", mp.get_property_number("display_fps", nil))
     visibility_mode(user_opts.visibility, true)
     update_duration_watch()
     request_init()
@@ -1896,9 +1912,8 @@ function osc_init()
     ne.content = function ()
         local title = state.forced_title or
                       mp.command_native({"expand-text", user_opts.title})
-        -- escape ASS, and strip newlines and trailing slashes
-        title = title:gsub("\\n", " "):gsub("\\$", ""):gsub("{","\\{")
-        return not (title == "") and title or "mpv"
+                      title = title:gsub("\n", " ")
+                      return title ~= "" and mp.command_native({"escape-ass", title}) or "mpv"
     end
 
     ne.eventresponder["mbtn_left_up"] = function ()
@@ -1976,11 +1991,11 @@ function osc_init()
     ne.softrepeat = true
     ne.content = osc_icons.skipback
     ne.eventresponder["mbtn_left_down"] =
-        function () mp.commandv("seek", -5, "relative", "keyframes") end
+        function () mp.commandv("seek", -5) end
     ne.eventresponder["shift+mbtn_left_down"] =
         function () mp.commandv("frame-back-step") end
     ne.eventresponder["mbtn_right_down"] =
-        function () mp.commandv("seek", -30, "relative", "keyframes") end
+        function () mp.commandv("seek", -30) end
 
     -- skipfrwd
     ne = new_element("skipfrwd", "button")
@@ -1988,11 +2003,11 @@ function osc_init()
     ne.softrepeat = true
     ne.content = osc_icons.skipforward
     ne.eventresponder["mbtn_left_down"] =
-        function () mp.commandv("seek", 10, "relative", "keyframes") end
+        function () mp.commandv("seek", 10) end
     ne.eventresponder["shift+mbtn_left_down"] =
         function () mp.commandv("frame-step") end
     ne.eventresponder["mbtn_right_down"] =
-        function () mp.commandv("seek", 60, "relative", "keyframes") end
+        function () mp.commandv("seek", 60) end
 
     -- ch_prev
     ne = new_element("ch_prev", "button")
@@ -2109,7 +2124,7 @@ function osc_init()
     ne.enabled = not (mp.get_property("percent-pos") == nil)
     state.slider_element = ne.enabled and ne or nil  -- used for forced_title
     ne.slider.markerF = function ()
-        local duration = mp.get_property_number("duration", nil)
+        local duration = mp.get_property_number("duration")
         if not (duration == nil) then
             local chapters = mp.get_property_native("chapter-list", {})
             local markers = {}
@@ -2122,9 +2137,9 @@ function osc_init()
         end
     end
     ne.slider.posF =
-        function () return mp.get_property_number("percent-pos", nil) end
+        function () return mp.get_property_number("percent-pos") end
     ne.slider.tooltipF = function (pos)
-        local duration = mp.get_property_number("duration", nil)
+        local duration = mp.get_property_number("duration")
         if not ((duration == nil) or (pos == nil)) then
             possec = duration * (pos / 100)
             return mp.format_time(possec)
@@ -2140,7 +2155,7 @@ function osc_init()
         if not cache_state then
             return nil
         end
-        local duration = mp.get_property_number("duration", nil)
+        local duration = mp.get_property_number("duration")
         if (duration == nil) or duration <= 0 then
             return nil
         end
@@ -2176,7 +2191,7 @@ function osc_init()
         end
     ne.eventresponder["mbtn_left_down"] = --exact seeks on single clicks
         function (element) mp.commandv("seek", get_slider_value(element),
-            "absolute-percent", "exact") end
+            "absolute-percent+exact") end
     ne.eventresponder["reset"] =
         function (element) element.state.lastseek = nil end
 
@@ -2265,7 +2280,39 @@ function osc_init()
     ne.eventresponder["wheel_down_press"] =
         function () mp.commandv("osd-auto", "add", "volume", -5) end
 
+    -- playback speed
+    ne = new_element("playback_speed", "button")
 
+    ne.content = function()
+        local speed = mp.get_property_number("speed", 1.0)
+        return string.format("%.2fx", speed)
+    end
+
+    ne.eventresponder["mbtn_left_up"] =
+    function ()
+        local speeds = {1.0, 1.25, 1.5, 1.75, 2.0}  -- List of playback speeds
+        local current_speed = mp.get_property_number("speed", 1.0)
+        local next_speed = speeds[1]  -- Default to the first speed in case current speed isn't found
+        
+        for i = 1, #speeds do
+            if current_speed == speeds[i] then
+                next_speed = speeds[(i % #speeds) + 1]
+                break
+            end
+        end
+        
+        mp.set_property("speed", next_speed)
+    end
+
+    ne.eventresponder["mbtn_right_up"] =
+    function ()
+        mp.set_property("speed", 1.0)
+    end
+
+ne.eventresponder["wheel_up_press"] =
+    function () mp.commandv("osd-auto", "add", "speed", 0.25) end
+ne.eventresponder["wheel_down_press"] =
+    function () mp.commandv("osd-auto", "add", "speed", -0.25) end
     -- load layout
     layout()
 
@@ -2278,52 +2325,25 @@ function osc_init()
     prepare_elements()
 end
 
-function reset_margins()
-    if state.using_video_margins then
-        for _, opt in ipairs(margins_opts) do
-            mp.set_property_number(opt[2], 0.0)
-        end
-        state.using_video_margins = false
-    end
-end
-
 function update_margins()
     local margins = osc_param.video_margins
 
     -- Don't use margins if it's visible only temporarily.
-    if (not state.osc_visible) or (get_hidetimeout() >= 0) or
+    if (not state.osc_visible) or
        (state.fullscreen and not user_opts.showfullscreen) or
        (not state.fullscreen and not user_opts.showwindowed)
     then
         margins = {l = 0, r = 0, t = 0, b = 0}
     end
 
-    if user_opts.boxvideo then
-        -- check whether any margin option has a non-default value
-        local margins_used = false
-
-        if not state.using_video_margins then
-            for _, opt in ipairs(margins_opts) do
-                if mp.get_property_number(opt[2], 0.0) ~= 0.0 then
-                    margins_used = true
-                end
-            end
-        end
-
-        if not margins_used then
-            for _, opt in ipairs(margins_opts) do
-                local v = margins[opt[1]]
-                if (v ~= 0) or state.using_video_margins then
-                    mp.set_property_number(opt[2], v)
-                    state.using_video_margins = true
-                end
-            end
-        end
+    if user_opts.userdataAvail then
+        mp.set_property_native("user-data/osc/margins", {
+            l = margins.l, r = margins.r, t = margins.t, b = margins.b,
+        })
     else
-        reset_margins()
+        utils.shared_script_property_set("osc-margins",
+            string.format("%f,%f,%f,%f", margins.l, margins.r, margins.t, margins.b))
     end
-
-    mp.set_property_native("user-data/osc/margins", margins)
 end
 
 --
@@ -2837,6 +2857,15 @@ end
 validate_user_opts()
 update_duration_watch()
 
+local function set_tick_delay(_, display_fps)
+    -- may be nil if unavailable or 0 fps is reported
+    if not display_fps or not user_opts.tick_delay_follow_display_fps then
+        tick_delay = user_opts.tick_delay
+        return
+    end
+    tick_delay = 1 / display_fps
+end
+
 mp.register_event("start-file", request_init)
 if user_opts.showonstart then mp.register_event("file-loaded", show_osc) end
 if user_opts.showonseek then mp.register_event("seek", show_osc) end
@@ -2867,31 +2896,25 @@ mp.register_script_message("osc-tracklist", function(dur)
     show_message(table.concat(msg, '\n\n'), dur)
 end)
 
-mp.observe_property("fullscreen", "bool",
-    function(name, val)
-        state.fullscreen = val
-        state.marginsREQ = true
-        request_init_resize()
-    end
-)
-mp.observe_property("border", "bool",
-    function(name, val)
-        state.border = val
-        request_init_resize()
-    end
-)
-mp.observe_property("window-maximized", "bool",
-    function(name, val)
-        state.maximized = val
-        request_init_resize()
-    end
-)
-mp.observe_property("idle-active", "bool",
-    function(name, val)
-        state.idle = val
-        request_tick()
-    end
-)
+mp.observe_property("fullscreen", "bool", function(_, val)
+    state.fullscreen = val
+    state.marginsREQ = true
+    request_init_resize()
+end)
+mp.observe_property("border", "bool", function(_, val)
+    state.border = val
+    request_init_resize()
+end)
+mp.observe_property("window-maximized", "bool", function(_, val)
+    state.maximized = val
+    request_init_resize()
+end)
+mp.observe_property("idle-active", "bool", function(_, val)
+    state.idle = val
+    request_tick()
+end)
+
+mp.observe_property("display-fps", "number", set_tick_delay)
 mp.observe_property("pause", "bool", pause_state)
 mp.observe_property("demuxer-cache-state", "native", cache_state)
 mp.observe_property("vo-configured", "bool", function(name, val)
@@ -2986,9 +3009,11 @@ function visibility_mode(mode, no_osd)
     end
 
     user_opts.visibility = mode
-    mp.set_property_native("user-data/osc/visibility", mode)
-
-    if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
+    if user_opts.userdataAvail then
+        mp.set_property_native("user-data/osc/visibility", mode)
+    else
+        utils.shared_script_property_set("osc-visibility", mode)
+    end    if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
         mp.osd_message("OSC visibility: " .. mode)
     end
 
@@ -3018,7 +3043,11 @@ function idlescreen_visibility(mode, no_osd)
         user_opts.idlescreen = false
     end
 
-    mp.set_property_native("user-data/osc/idlescreen", user_opts.idlescreen)
+    if user_opts.userdataAvail then
+        mp.set_property_native("user-data/osc/idlescreen", mode)
+    else
+        utils.shared_script_property_set("osc-idlescreen", mode)
+    end
 
     if not no_osd and tonumber(mp.get_property("osd-level")) >= 1 then
         mp.osd_message("OSC logo visibility: " .. tostring(mode))
@@ -3029,6 +3058,7 @@ end
 
 visibility_mode(user_opts.visibility, true)
 mp.register_script_message("osc-visibility", visibility_mode)
+mp.register_script_message("osc-show", show_osc)
 mp.add_key_binding(nil, "visibility", function() visibility_mode("cycle") end)
 
 mp.register_script_message("osc-idlescreen", idlescreen_visibility)
